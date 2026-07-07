@@ -1,0 +1,26 @@
+[package]
+name = "gclba-index"
+version = "0.1.0"
+edition = "2021"
+description = "Private GCLBA property intelligence index and conflict ledger."
+license = "UNLICENSED"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+csv = "1.3"
+rustyred-thg-core = { path = "vendor/theorem/rustyredcore_THG/crates/rustyred-thg-core" }
+rustyred-thg-datawave = { path = "vendor/theorem/rustyredcore_THG/crates/rustyred-thg-datawave" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
+[package.metadata.gclba]
+datawave_source = "vendor/theorem/rustyredcore_THG/crates/rustyred-thg-datawave"
+datawave_submodule_rev = "e49952a3d899594456adf96c65f98371484133f0"
+datawave_submodule_ref = "origin/feat/phase-4-reconstruction-backend"

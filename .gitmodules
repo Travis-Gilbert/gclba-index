@@ -1,0 +1,4 @@
+[submodule "vendor/theorem"]
+	path = vendor/theorem
+	url = https://github.com/Travis-Gilbert/Theorem.git
+	branch = feat/phase-4-reconstruction-backend
