@@ -82,6 +82,13 @@ cargo test
 
 ## Railway Deployment Note
 
+Current production service:
+
+- URL: `https://gclba-index-production.up.railway.app`
+- Project ID: `5bf96e20-3223-4548-b035-e6405af403f7`
+- Service ID: `1fb2906b-257f-47cb-b9c9-1deca82401c9`
+- Deployment ID: `cc351080-fa9d-4a10-98f7-9d2607613d7b`
+
 The repository includes the Theorem engine as a private Git submodule. Railway's
 standard GitHub autodeploy requires a connected GitHub account with contributor
 access to the repository, and Railway support notes that private submodule
