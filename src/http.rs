@@ -1,6 +1,5 @@
-use crate::adapters::parse_adapter_bytes;
+use crate::export_store::ExportStore;
 use crate::models::{AdapterKind, ConflictKind, IndexPayload};
-use crate::resolution::build_index;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -11,10 +10,21 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub type SharedState = Arc<RwLock<IndexPayload>>;
+#[derive(Clone, Debug)]
+pub struct AppState {
+    payload: Arc<RwLock<IndexPayload>>,
+    store: ExportStore,
+}
 
 pub fn router(payload: IndexPayload) -> Router {
-    let state = Arc::new(RwLock::new(payload));
+    router_with_store(payload, ExportStore::new("exports"))
+}
+
+pub fn router_with_store(payload: IndexPayload, store: ExportStore) -> Router {
+    let state = AppState {
+        payload: Arc::new(RwLock::new(payload)),
+        store,
+    };
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ingest/{adapter}", post(ingest))
@@ -30,23 +40,28 @@ async fn healthz() -> &'static str {
 
 async fn ingest(
     Path(adapter): Path<String>,
-    State(state): State<SharedState>,
+    State(state): State<AppState>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     let adapter: AdapterKind = adapter.parse().map_err(ApiError::bad_request)?;
-    let records = parse_adapter_bytes(adapter, &body)
+    state
+        .store
+        .save_export(adapter, &body)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let payload = build_index(records);
+    let payload = state
+        .store
+        .rebuild_index()
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
     let coverage = payload.coverage.clone();
-    *state.write().await = payload;
+    *state.payload.write().await = payload;
     Ok((StatusCode::CREATED, Json(coverage)))
 }
 
 async fn dossier(
     Path(parcel_id): Path<String>,
-    State(state): State<SharedState>,
+    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let payload = state.read().await;
+    let payload = state.payload.read().await;
     let requested = parcel_id.to_ascii_uppercase();
     let dossier = payload
         .parcels
@@ -65,14 +80,14 @@ async fn dossier(
 
 async fn conflicts(
     Query(query): Query<HashMap<String, String>>,
-    State(state): State<SharedState>,
+    State(state): State<AppState>,
 ) -> Result<impl IntoResponse, ApiError> {
     let kind = query
         .get("kind")
         .map(|value| value.parse::<ConflictKind>())
         .transpose()
         .map_err(ApiError::bad_request)?;
-    let payload = state.read().await;
+    let payload = state.payload.read().await;
     let conflicts: Vec<_> = payload
         .conflicts
         .iter()
@@ -82,8 +97,8 @@ async fn conflicts(
     Ok(Json(conflicts))
 }
 
-async fn coverage(State(state): State<SharedState>) -> impl IntoResponse {
-    let payload = state.read().await;
+async fn coverage(State(state): State<AppState>) -> impl IntoResponse {
+    let payload = state.payload.read().await;
     Json(payload.coverage.clone())
 }
 
@@ -118,15 +133,23 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::body::Body;
     use axum::http::Request;
+    use serde_json::Value;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower::ServiceExt;
 
     #[tokio::test]
-    async fn http_endpoints_return_seeded_index() {
+    async fn http_ingest_persists_and_rebuilds_combined_index() {
+        let root = test_dir("http-ingest");
         let csv = "parcel_id,address,owner,gclba_owned,property_class\n\
                    40-12-345-067,123 North Saginaw Street,GCLBA,true,Residential";
-        let app = router(IndexPayload::default());
+        let filemaker = "parcel_id,address,program\n\
+                         40-12-345-067,123 North Saginaw Street,Homebuyer";
+        let app = router_with_store(IndexPayload::default(), ExportStore::new(&root));
         let response = app
             .clone()
             .oneshot(
@@ -134,6 +157,18 @@ mod tests {
                     .method("POST")
                     .uri("/ingest/site_control_export")
                     .body(Body::from(csv))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ingest/filemaker_csv")
+                    .body(Body::from(filemaker))
                     .unwrap(),
             )
             .await
@@ -150,5 +185,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let coverage: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(coverage["parcelsIndexed"], 1);
+        assert_eq!(coverage["sourceCount"], 2);
+
+        assert!(root.join("site_control_export").exists());
+        assert!(root.join("filemaker_csv").exists());
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "gclba-index-{name}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        path
     }
 }

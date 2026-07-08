@@ -2,7 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gclba_index::http;
 use gclba_index::{
-    build_index, ingest_datawave_records, parse_adapter_bytes, AdapterKind, IndexPayload,
+    build_index, ingest_datawave_records, parse_adapter_bytes, AdapterKind, ExportStore,
+    IndexPayload,
 };
 use std::path::PathBuf;
 
@@ -33,6 +34,8 @@ enum Command {
     Serve {
         #[arg(long)]
         index: Option<PathBuf>,
+        #[arg(long, default_value = "exports")]
+        exports_dir: PathBuf,
         #[arg(long, default_value = "0.0.0.0:8080")]
         bind: String,
     },
@@ -94,17 +97,25 @@ async fn main() -> Result<()> {
                 datawave.skipped,
             );
         }
-        Command::Serve { index, bind } => {
+        Command::Serve {
+            index,
+            exports_dir,
+            bind,
+        } => {
+            let store = ExportStore::new(exports_dir);
             let payload = match index {
                 Some(path) => {
                     let bytes = std::fs::read(path)?;
                     serde_json::from_slice::<IndexPayload>(&bytes)?
                 }
-                None => IndexPayload::default(),
+                None => store.rebuild_index()?,
             };
             let listener = tokio::net::TcpListener::bind(&bind).await?;
-            println!("serving gclba-index on {bind}");
-            axum::serve(listener, http::router(payload)).await?;
+            println!(
+                "serving gclba-index on {bind} with exports from {}",
+                store.root().display()
+            );
+            axum::serve(listener, http::router_with_store(payload, store)).await?;
         }
     }
     Ok(())

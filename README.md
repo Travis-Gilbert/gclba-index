@@ -77,9 +77,16 @@ Run the internal API from an exported payload:
 cargo run -- serve --index out/index.json --bind 0.0.0.0:8080
 ```
 
+Run the internal API from uploaded source exports:
+
+```bash
+cargo run -- serve --exports-dir exports --bind 0.0.0.0:8080
+```
+
 Endpoints:
 
-- `POST /ingest/{adapter}`
+- `POST /ingest/{adapter}` stores the raw export under
+  `exports/{adapter}/` and rebuilds the combined index from every saved export.
 - `GET /dossier/{parcel_id}`
 - `GET /conflicts?kind=owner_mismatch`
 - `GET /coverage`
