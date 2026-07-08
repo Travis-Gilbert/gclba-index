@@ -69,11 +69,11 @@ fn record_from_row(
         structure_flag: Some(true),
         condition_grade: value(&["condition", "conditiongrade"]),
         prior_condition_grade: value(&["priorcondition", "previouscondition"]),
-        assessed_value: value(&["assessedvalue", "saleprice", "purchaseprice"])
+        assessed_value: value(&["assessedvalue", "assessedvaluation", "saleprice", "purchaseprice"])
             .as_deref()
             .and_then(parse_money),
-        sale_date: value(&["saledate", "closingdate", "dispositiondate"]),
-        program: value(&["program", "dispositionprogram", "caseprogram"]),
+        sale_date: value(&["saledate", "datesold", "closingdate", "dispositiondate"]),
+        program: value(&["program", "programtype", "dispositionprogram", "caseprogram"]),
         facts: public_facts(headers, row),
     }
 }
@@ -122,5 +122,18 @@ mod tests {
         ] {
             assert!(!serialized.contains(blocked_value));
         }
+    }
+
+    #[test]
+    fn filemaker_adapter_reads_current_export_headers() {
+        let csv = "parcelId,address,buyerName,buyerEmail,programType,dateSold,enforcementLevel,currentAction\n\
+                   40-12-345-067,123 North Saginaw Street,Jane Buyer,jane@example.com,Homebuyer,2026-02-12,High,Inspect";
+        let rows = FilemakerCsvAdapter.parse_bytes(csv.as_bytes()).unwrap();
+        let row = &rows[0];
+        assert_eq!(row.parcel_id_norm.as_deref(), Some("40-12-345-067"));
+        assert_eq!(row.program.as_deref(), Some("Homebuyer"));
+        assert_eq!(row.sale_date.as_deref(), Some("2026-02-12"));
+        assert!(!row.facts.contains_key("buyerName"));
+        assert!(!row.facts.contains_key("buyerEmail"));
     }
 }
