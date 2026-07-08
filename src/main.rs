@@ -24,12 +24,16 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long)]
+        skip_datawave: bool,
     },
     Build {
         #[arg(long = "source", required = true)]
         sources: Vec<String>,
         #[arg(long)]
         output: PathBuf,
+        #[arg(long)]
+        skip_datawave: bool,
     },
     Serve {
         #[arg(long)]
@@ -49,28 +53,37 @@ async fn main() -> Result<()> {
             adapter,
             file,
             output,
+            skip_datawave,
         } => {
             let adapter: AdapterKind = adapter.parse().map_err(anyhow::Error::msg)?;
             let bytes = std::fs::read(&file)?;
             let records = parse_adapter_bytes(adapter, &bytes)?;
-            let datawave = ingest_datawave_records(&records)?;
-            let mut payload = build_index(records);
-            attach_datawave_summary(&mut payload, &datawave);
+            let payload = if skip_datawave {
+                build_index(records)
+            } else {
+                let datawave = ingest_datawave_records(&records)?;
+                let mut payload = build_index(records);
+                attach_datawave_summary(&mut payload, &datawave);
+                payload
+            };
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&output, serde_json::to_vec_pretty(&payload)?)?;
             println!(
-                "wrote {} parcels, {} homes, {} active programs to {} (datawave ingested {}, skipped {})",
+                "wrote {} parcels, {} homes, {} active programs to {}{}",
                 payload.coverage.parcels_indexed,
                 payload.coverage.home_count,
                 payload.coverage.active_program_count,
                 output.display(),
-                datawave.ingested,
-                datawave.skipped,
+                datawave_summary_suffix(&payload),
             );
         }
-        Command::Build { sources, output } => {
+        Command::Build {
+            sources,
+            output,
+            skip_datawave,
+        } => {
             let mut records = Vec::new();
             for source in sources {
                 let (adapter, path) = source.split_once(':').ok_or_else(|| {
@@ -80,23 +93,27 @@ async fn main() -> Result<()> {
                 let bytes = std::fs::read(path)?;
                 records.extend(parse_adapter_bytes(adapter, &bytes)?);
             }
-            let datawave = ingest_datawave_records(&records)?;
-            let mut payload = build_index(records);
-            attach_datawave_summary(&mut payload, &datawave);
+            let payload = if skip_datawave {
+                build_index(records)
+            } else {
+                let datawave = ingest_datawave_records(&records)?;
+                let mut payload = build_index(records);
+                attach_datawave_summary(&mut payload, &datawave);
+                payload
+            };
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&output, serde_json::to_vec_pretty(&payload)?)?;
             println!(
-                "wrote {} parcels, {} homes, {} active programs, {} conflicts, {} candidates to {} (datawave ingested {}, skipped {})",
+                "wrote {} parcels, {} homes, {} active programs, {} conflicts, {} candidates to {}{}",
                 payload.coverage.parcels_indexed,
                 payload.coverage.home_count,
                 payload.coverage.active_program_count,
                 payload.coverage.open_conflict_count,
                 payload.coverage.candidate_count,
                 output.display(),
-                datawave.ingested,
-                datawave.skipped,
+                datawave_summary_suffix(&payload),
             );
         }
         Command::Serve {
@@ -121,4 +138,15 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn datawave_summary_suffix(payload: &IndexPayload) -> String {
+    if payload.coverage.datawave_ingested == 0 && payload.coverage.datawave_skipped == 0 {
+        " (datawave skipped)".to_string()
+    } else {
+        format!(
+            " (datawave ingested {}, skipped {})",
+            payload.coverage.datawave_ingested, payload.coverage.datawave_skipped
+        )
+    }
 }
