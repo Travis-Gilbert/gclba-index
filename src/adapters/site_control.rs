@@ -1,7 +1,7 @@
 use super::Adapter;
 use crate::models::{AdapterKind, NormalizedRecord};
 use crate::normalize::{
-    is_gclba_owner, is_private_field, normalize_address_key, normalize_header, normalize_owner,
+    is_gclba_owner, is_private_field, normalize_address_key, normalize_header, normalize_owner_opt,
     normalize_parcel_id, parse_bool, parse_money, value_to_string,
 };
 use anyhow::{anyhow, Result};
@@ -152,7 +152,7 @@ impl SiteControlExportAdapter {
                 "taxpayername",
             ],
         );
-        let owner_norm = owner.as_deref().and_then(normalize_owner);
+        let owner_norm = owner.as_deref().and_then(normalize_owner_opt);
         let explicit_gclba = first_value(
             normalized,
             &["gclbalabel", "gclbaowned", "landbankowned", "ownedbygclba"],

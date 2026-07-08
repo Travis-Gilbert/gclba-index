@@ -2,7 +2,9 @@ use crate::models::{
     AdapterKind, CandidateProperty, CanonicalParcel, ConflictKind, CoverageSummary, Dossier,
     IndexPayload, NormalizedRecord, ParcelExport, SourceConflict, SourceFact, SourceRecord,
 };
-use crate::normalize::{is_gclba_owner, normalize_parcel_id, value_to_string};
+use crate::normalize::{
+    condition_grade_rank, is_gclba_owner, normalize_parcel_id, value_to_string,
+};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -265,7 +267,10 @@ fn condition_regression(dossier: &Dossier, records: &[NormalizedRecord]) -> Opti
         let Some(prior) = record.prior_condition_grade.as_deref() else {
             return false;
         };
-        condition_rank(current) > condition_rank(prior)
+        match (condition_grade_rank(current), condition_grade_rank(prior)) {
+            (Some(current_rank), Some(prior_rank)) => current_rank > prior_rank,
+            _ => false,
+        }
     })?;
     Some(conflict(
         dossier,
@@ -411,17 +416,6 @@ fn structure_string(value: bool) -> String {
         "home".to_string()
     } else {
         "lot".to_string()
-    }
-}
-
-fn condition_rank(value: &str) -> i32 {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "excellent" | "a" => 0,
-        "good" | "b" => 1,
-        "fair" | "c" => 2,
-        "poor" | "d" => 3,
-        "demo" | "demolition" | "e" => 4,
-        _ => 0,
     }
 }
 

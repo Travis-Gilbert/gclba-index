@@ -16,6 +16,21 @@ imports into the GCLBA portal.
 PII is dropped at the adapter boundary. Buyer names, emails, phone numbers,
 organizations, notes, and reviewed-by fields are not hashed or retained.
 
+## Normalization Contract
+
+The adapter pre-pass uses pure normalization functions before creating index
+records:
+
+- Parcel IDs strip non-digits and accept exactly 10 digits, then render as
+  `XX-XX-XXX-XXX`. Anything else is unresolved and must flow to conflict
+  handling instead of being padded.
+- Address keys uppercase, remove punctuation, standardize directionals and USPS
+  suffixes, and drop unit designators plus everything after them.
+- Owner names uppercase, remove punctuation, and collapse whitespace without
+  replacing the original owner identity. GCLBA labeling uses the fixed name set
+  in `src/normalize.rs`.
+- Condition regression uses the fixed ordering in `CONDITION_GRADE_ORDER`.
+
 ## Datawave Pin
 
 The service validates against a pinned Theorem submodule:

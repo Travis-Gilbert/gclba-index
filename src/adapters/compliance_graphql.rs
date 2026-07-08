@@ -1,7 +1,7 @@
 use super::Adapter;
 use crate::models::{AdapterKind, NormalizedRecord};
 use crate::normalize::{
-    is_private_field, normalize_address_key, normalize_owner, normalize_parcel_id, parse_bool,
+    is_private_field, normalize_address_key, normalize_owner_opt, normalize_parcel_id, parse_bool,
     parse_money, value_to_string,
 };
 use anyhow::Result;
@@ -89,7 +89,7 @@ fn record_from_object(object: &Map<String, Value>, index: usize) -> NormalizedRe
         address,
         owner_norm: get(&["owner", "ownerName"])
             .as_deref()
-            .and_then(normalize_owner),
+            .and_then(normalize_owner_opt),
         gclba_label: get(&["gclbaLabel", "gclbaOwned"])
             .as_deref()
             .and_then(parse_bool),

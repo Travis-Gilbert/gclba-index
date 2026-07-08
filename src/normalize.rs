@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::fmt;
 
 const PRIVATE_MARKERS: &[&str] = &[
     "buyer",
@@ -9,6 +10,33 @@ const PRIVATE_MARKERS: &[&str] = &[
     "reviewedby",
     "reviewed_by",
 ];
+
+pub const GCLBA_OWNER_NAMES: &[&str] = &[
+    "GENESEE COUNTY LAND BANK",
+    "GENESEE COUNTY LAND BANK AUTHORITY",
+    "GCLBA",
+];
+
+pub const CONDITION_GRADE_ORDER: &[&str] = &["EXCELLENT", "GOOD", "FAIR", "POOR", "DEMO"];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PidError {
+    Empty,
+    WrongDigitCount { digits: usize },
+}
+
+impl fmt::Display for PidError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "parcel id is empty"),
+            Self::WrongDigitCount { digits } => {
+                write!(formatter, "parcel id has {digits} digits, expected 10")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PidError {}
 
 pub fn normalize_header(value: &str) -> String {
     value
@@ -25,114 +53,101 @@ pub fn is_private_field(value: &str) -> bool {
         .any(|marker| normalized.contains(&normalize_header(marker)))
 }
 
+pub fn normalize_pid(value: &str) -> Result<String, PidError> {
+    let digits: String = value.chars().filter(|ch| ch.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return Err(PidError::Empty);
+    }
+    if digits.len() != 10 {
+        return Err(PidError::WrongDigitCount {
+            digits: digits.len(),
+        });
+    }
+
+    Ok(format!(
+        "{}-{}-{}-{}",
+        &digits[0..2],
+        &digits[2..4],
+        &digits[4..7],
+        &digits[7..10]
+    ))
+}
+
 pub fn normalize_parcel_id(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
+    normalize_pid(value).ok()
+}
 
-    let parts: Vec<String> = trimmed
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_uppercase())
-        .collect();
-    if parts.len() == 4
-        && parts
-            .iter()
-            .all(|part| part.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        return Some(format!(
-            "{}-{}-{}-{}",
-            pad_left(&parts[0], 2),
-            pad_left(&parts[1], 2),
-            pad_left(&parts[2], 3),
-            pad_left(&parts[3], 3)
-        ));
-    }
-
-    let compact: String = trimmed
+pub fn normalize_address(value: &str) -> String {
+    let scrubbed = value
         .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_uppercase)
-        .collect();
-    if compact.len() == 10 && compact.chars().all(|ch| ch.is_ascii_digit()) {
-        return Some(format!(
-            "{}-{}-{}-{}",
-            &compact[0..2],
-            &compact[2..4],
-            &compact[4..7],
-            &compact[7..10]
-        ));
+        .map(|ch| {
+            if ch == '#' {
+                '#'
+            } else if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>();
+
+    let mut tokens = Vec::new();
+    for raw in scrubbed.split_whitespace() {
+        if is_unit_designator(raw) {
+            break;
+        }
+        tokens.push(standardize_address_token(raw).to_string());
     }
-    if compact.len() < 10 && compact.chars().all(|ch| ch.is_ascii_digit()) {
-        let padded = pad_left(&compact, 10);
-        return Some(format!(
-            "{}-{}-{}-{}",
-            &padded[0..2],
-            &padded[2..4],
-            &padded[4..7],
-            &padded[7..10]
-        ));
-    }
-    if compact.is_empty() {
-        None
-    } else {
-        Some(compact)
-    }
+    tokens.join(" ")
 }
 
 pub fn normalize_address_key(value: &str) -> Option<String> {
-    let without_unit = value
-        .split(|ch| ch == ',' || ch == ';')
-        .next()
-        .unwrap_or(value);
-    let mut tokens = Vec::new();
-    for raw in without_unit
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-    {
-        let token = raw.to_ascii_uppercase();
-        if matches!(
-            token.as_str(),
-            "APT" | "APARTMENT" | "UNIT" | "STE" | "SUITE" | "FL" | "FLOOR"
-        ) {
-            break;
-        }
-        tokens.push(standardize_address_token(&token).to_string());
-    }
-
-    if tokens.is_empty() {
+    let normalized = normalize_address(value);
+    if normalized.is_empty() {
         None
     } else {
-        Some(tokens.join(" "))
+        Some(normalized)
     }
 }
 
-pub fn normalize_owner(value: &str) -> Option<String> {
-    let normalized = value
+pub fn normalize_owner(value: &str) -> String {
+    value
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .to_ascii_uppercase();
+        .to_ascii_uppercase()
+}
+
+pub fn normalize_owner_opt(value: &str) -> Option<String> {
+    let normalized = normalize_owner(value);
     if normalized.is_empty() {
         None
-    } else if is_gclba_owner(&normalized) {
-        Some("GCLBA".to_string())
     } else {
         Some(normalized)
     }
 }
 
 pub fn is_gclba_owner(value: &str) -> bool {
-    let owner = value.to_ascii_uppercase();
-    owner.contains("GCLBA")
-        || owner.contains("GENESEE COUNTY LAND BANK")
-        || owner.contains("LAND BANK AUTHORITY")
+    let owner = normalize_owner(value);
+    GCLBA_OWNER_NAMES.iter().any(|name| owner == *name)
+}
+
+pub fn condition_grade_rank(value: &str) -> Option<usize> {
+    let normalized = normalize_owner(value);
+    match normalized.as_str() {
+        "A" => Some(0),
+        "B" => Some(1),
+        "C" => Some(2),
+        "D" => Some(3),
+        "E" => Some(4),
+        "DEMOLITION" => Some(4),
+        _ => CONDITION_GRADE_ORDER
+            .iter()
+            .position(|grade| normalized == *grade),
+    }
 }
 
 pub fn parse_bool(value: &str) -> Option<bool> {
@@ -165,12 +180,14 @@ pub fn value_to_string(value: &Value) -> String {
     }
 }
 
-fn pad_left(value: &str, width: usize) -> String {
-    if value.len() >= width {
-        value[value.len() - width..].to_string()
-    } else {
-        format!("{value:0>width$}")
+fn is_unit_designator(token: &str) -> bool {
+    if token.starts_with('#') {
+        return true;
     }
+    matches!(
+        token,
+        "APT" | "APARTMENT" | "UNIT" | "STE" | "SUITE" | "LOT" | "#"
+    )
 }
 
 fn standardize_address_token(token: &str) -> &str {
@@ -191,6 +208,8 @@ fn standardize_address_token(token: &str) -> &str {
         "LANE" => "LN",
         "COURT" => "CT",
         "PLACE" => "PL",
+        "CIRCLE" => "CIR",
+        "HIGHWAY" => "HWY",
         "TERRACE" => "TER",
         "PARKWAY" => "PKWY",
         other => other,
@@ -202,16 +221,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parcel_ids_are_reformatted() {
+    fn parcel_ids_are_strictly_reformatted() {
         let cases = [
-            ("40-12-345-067", "40-12-345-067"),
-            ("4012345067", "40-12-345-067"),
-            ("40.12.345.67", "40-12-345-067"),
-            ("4-2-3-7", "04-02-003-007"),
+            ("14-34-577-050", "14-34-577-050"),
+            ("1434577050", "14-34-577-050"),
+            ("14 34 577 050", "14-34-577-050"),
+            ("14.34.577.050", "14-34-577-050"),
+            ("40-10-227-044", "40-10-227-044"),
+            ("4001411023", "40-01-411-023"),
         ];
         for (raw, expected) in cases {
+            assert_eq!(normalize_pid(raw).as_deref(), Ok(expected));
             assert_eq!(normalize_parcel_id(raw).as_deref(), Some(expected));
         }
+        assert_eq!(
+            normalize_pid("143457705").unwrap_err(),
+            PidError::WrongDigitCount { digits: 9 }
+        );
+        assert_eq!(normalize_parcel_id("143457705"), None);
     }
 
     #[test]
@@ -220,10 +247,46 @@ mod tests {
             ("123 North Saginaw Street Apt 4", "123 N SAGINAW ST"),
             ("10 w court road, unit 2", "10 W CT RD"),
             ("77 East Fifth Avenue", "77 E FIFTH AVE"),
+            ("8 southeast circle #12", "8 SE CIR"),
+            ("9 Northwest Highway Lot 3", "9 NW HWY"),
+            ("14 west court boulevard", "14 W CT BLVD"),
+            ("22 northeast lane suite 8", "22 NE LN"),
+            ("3 Southwest Place", "3 SW PL"),
+            ("4 South Drive", "4 S DR"),
         ];
         for (raw, expected) in cases {
+            assert_eq!(normalize_address(raw), expected);
             assert_eq!(normalize_address_key(raw).as_deref(), Some(expected));
         }
+    }
+
+    #[test]
+    fn owners_are_normalized_without_collapsing_identity() {
+        assert_eq!(
+            normalize_owner("Genesee County Land Bank Authority, Inc."),
+            "GENESEE COUNTY LAND BANK AUTHORITY INC"
+        );
+        assert_eq!(
+            normalize_owner(" Genesee County Land Bank Authority "),
+            "GENESEE COUNTY LAND BANK AUTHORITY"
+        );
+        assert!(is_gclba_owner("Genesee County Land Bank Authority"));
+        assert!(is_gclba_owner("GCLBA"));
+        assert!(!is_gclba_owner("Private Land Bank Holdings"));
+    }
+
+    #[test]
+    fn condition_grade_order_is_fixed() {
+        assert_eq!(
+            CONDITION_GRADE_ORDER,
+            ["EXCELLENT", "GOOD", "FAIR", "POOR", "DEMO"]
+        );
+        assert!(condition_grade_rank("Poor") > condition_grade_rank("Good"));
+        assert_eq!(
+            condition_grade_rank("demolition"),
+            condition_grade_rank("E")
+        );
+        assert_eq!(condition_grade_rank("unknown"), None);
     }
 
     #[test]
