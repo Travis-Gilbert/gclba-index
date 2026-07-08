@@ -72,9 +72,9 @@ impl ExportStore {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or_default();
-            let adapter: AdapterKind = adapter_name
-                .parse()
-                .map_err(|err: String| anyhow::anyhow!("{err}"))?;
+            let Ok(adapter) = adapter_name.parse::<AdapterKind>() else {
+                continue;
+            };
             let mut adapter_files = sorted_paths(&dir)?;
             adapter_files.retain(|path| path.is_file());
             files.extend(adapter_files.into_iter().map(|path| (adapter, path)));
@@ -149,6 +149,7 @@ mod tests {
         store
             .save_export(AdapterKind::FilemakerCsv, filemaker.as_bytes())
             .unwrap();
+        fs::create_dir_all(root.join("lost+found")).unwrap();
 
         let payload = store.rebuild_index().unwrap();
         assert_eq!(payload.coverage.parcels_indexed, 1);
