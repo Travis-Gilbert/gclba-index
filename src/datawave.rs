@@ -20,6 +20,18 @@ pub fn ingest_datawave_records(records: &[NormalizedRecord]) -> Result<DatawaveB
         .with_field("PARCEL_ID_NORM", FieldType::Text, IndexPolicy::INDEXED)
         .with_field("ADDRESS_KEY", FieldType::Text, IndexPolicy::INDEXED)
         .with_field("OWNER_NORM", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field("GCLBA_LABEL", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field("STRUCTURE_FLAG", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field("CONDITION_GRADE", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field(
+            "PRIOR_CONDITION_GRADE",
+            FieldType::Text,
+            IndexPolicy::INDEXED,
+        )
+        .with_field("ASSESSED_VALUE", FieldType::Number, IndexPolicy::INDEXED)
+        .with_field("SALE_DATE", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field("PROGRAM", FieldType::Text, IndexPolicy::INDEXED)
+        .with_field("OBSERVED_AT", FieldType::Text, IndexPolicy::INDEXED)
         .with_field("SOURCE", FieldType::Text, IndexPolicy::INDEXED)
         .with_field("SOURCE_RECORD_ID", FieldType::Text, IndexPolicy::INDEXED);
     let rules = vec![
@@ -27,6 +39,14 @@ pub fn ingest_datawave_records(records: &[NormalizedRecord]) -> Result<DatawaveB
         FieldMapRule::new("parcelIdNorm", "PARCEL_ID_NORM"),
         FieldMapRule::new("addressKey", "ADDRESS_KEY"),
         FieldMapRule::new("ownerNorm", "OWNER_NORM"),
+        FieldMapRule::new("gclbaLabel", "GCLBA_LABEL"),
+        FieldMapRule::new("structureFlag", "STRUCTURE_FLAG"),
+        FieldMapRule::new("conditionGrade", "CONDITION_GRADE"),
+        FieldMapRule::new("priorConditionGrade", "PRIOR_CONDITION_GRADE"),
+        FieldMapRule::new("assessedValue", "ASSESSED_VALUE"),
+        FieldMapRule::new("saleDate", "SALE_DATE"),
+        FieldMapRule::new("program", "PROGRAM"),
+        FieldMapRule::new("observedAt", "OBSERVED_AT"),
         FieldMapRule::new("sourceId", "SOURCE"),
         FieldMapRule::new("sourceRecordId", "SOURCE_RECORD_ID"),
     ];

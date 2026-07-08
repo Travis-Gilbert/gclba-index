@@ -89,6 +89,10 @@ pub struct CoverageSummary {
     pub open_conflict_count: usize,
     pub candidate_count: usize,
     pub per_source: BTreeMap<String, usize>,
+    pub datawave_ingested: usize,
+    pub datawave_skipped: usize,
+    pub datawave_fields_written: usize,
+    pub datawave_edges_written: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -135,6 +139,7 @@ pub struct SourceFact {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConflictKind {
+    Candidate,
     OwnerMismatch,
     ReverseMismatch,
     PidOrphan,
@@ -145,6 +150,7 @@ pub enum ConflictKind {
 impl ConflictKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            ConflictKind::Candidate => "candidate",
             ConflictKind::OwnerMismatch => "owner_mismatch",
             ConflictKind::ReverseMismatch => "reverse_mismatch",
             ConflictKind::PidOrphan => "pid_orphan",
@@ -159,6 +165,7 @@ impl FromStr for ConflictKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "candidate" => Ok(Self::Candidate),
             "owner_mismatch" => Ok(Self::OwnerMismatch),
             "reverse_mismatch" => Ok(Self::ReverseMismatch),
             "pid_orphan" => Ok(Self::PidOrphan),

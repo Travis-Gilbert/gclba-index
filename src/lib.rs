@@ -10,4 +10,4 @@ pub use adapters::{parse_adapter_bytes, Adapter};
 pub use datawave::{ingest_datawave_records, DatawaveBatchSummary};
 pub use export_store::ExportStore;
 pub use models::*;
-pub use resolution::build_index;
+pub use resolution::{attach_datawave_summary, build_index};

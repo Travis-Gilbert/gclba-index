@@ -1,3 +1,4 @@
+mod bsa_tax;
 mod compliance_graphql;
 mod filemaker;
 mod site_control;
@@ -5,6 +6,7 @@ mod site_control;
 use crate::models::{AdapterKind, NormalizedRecord};
 use anyhow::Result;
 
+pub use bsa_tax::BsaTaxAdapter;
 pub use compliance_graphql::ComplianceGraphqlAdapter;
 pub use filemaker::FilemakerCsvAdapter;
 pub use site_control::SiteControlExportAdapter;
@@ -20,6 +22,6 @@ pub fn parse_adapter_bytes(kind: AdapterKind, bytes: &[u8]) -> Result<Vec<Normal
         AdapterKind::FilemakerCsv => FilemakerCsvAdapter.parse_bytes(bytes),
         AdapterKind::CountyArcgis => SiteControlExportAdapter::county_arcgis().parse_bytes(bytes),
         AdapterKind::ComplianceGraphql => ComplianceGraphqlAdapter.parse_bytes(bytes),
-        AdapterKind::BsaTax => Ok(Vec::new()),
+        AdapterKind::BsaTax => BsaTaxAdapter.parse_bytes(bytes),
     }
 }

@@ -15,7 +15,7 @@ rustyred-thg-datawave = { path = "vendor/theorem/rustyredcore_THG/crates/rustyre
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread"] }
+tokio = { version = "1.47", features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1,3 +1,4 @@
+use crate::datawave::DatawaveBatchSummary;
 use crate::models::{
     AdapterKind, CandidateProperty, CanonicalParcel, ConflictKind, CoverageSummary, Dossier,
     IndexPayload, NormalizedRecord, ParcelExport, SourceConflict, SourceFact, SourceRecord,
@@ -19,7 +20,16 @@ pub fn build_index(records: Vec<NormalizedRecord>) -> IndexPayload {
     let county_parcels: BTreeSet<String> = groups
         .values()
         .flatten()
-        .filter(|record| record.source_kind() == Some(AdapterKind::CountyArcgis))
+        .filter(|record| {
+            record.source_kind() == Some(AdapterKind::CountyArcgis)
+                && (record.gclba_label.unwrap_or(false) || owner_is_gclba(record))
+        })
+        .filter_map(|record| record.parcel_id_norm.clone())
+        .collect();
+    let tracked_parcels: BTreeSet<String> = groups
+        .values()
+        .flatten()
+        .filter(|record| record.source_kind() == Some(AdapterKind::ComplianceGraphql))
         .filter_map(|record| record.parcel_id_norm.clone())
         .collect();
 
@@ -34,9 +44,10 @@ pub fn build_index(records: Vec<NormalizedRecord>) -> IndexPayload {
                 .then(a.source_record_id.cmp(&b.source_record_id))
         });
         let dossier = dossier_for_group(&key, &group);
-        let mut group_conflicts = conflicts_for_group(&dossier, &group, &county_parcels);
+        let mut group_conflicts =
+            conflicts_for_group(&dossier, &group, &county_parcels, &tracked_parcels);
         for conflict in &group_conflicts {
-            if conflict.kind == ConflictKind::OwnerMismatch {
+            if conflict.kind == ConflictKind::Candidate {
                 candidates.push(candidate_for_conflict(conflict, &dossier));
             }
         }
@@ -54,6 +65,13 @@ pub fn build_index(records: Vec<NormalizedRecord>) -> IndexPayload {
         conflicts,
         candidates,
     }
+}
+
+pub fn attach_datawave_summary(payload: &mut IndexPayload, summary: &DatawaveBatchSummary) {
+    payload.coverage.datawave_ingested = summary.ingested;
+    payload.coverage.datawave_skipped = summary.skipped;
+    payload.coverage.datawave_fields_written = summary.fields_written;
+    payload.coverage.datawave_edges_written = summary.edges_written;
 }
 
 fn resolution_key(record: &NormalizedRecord) -> String {
@@ -164,8 +182,12 @@ fn conflicts_for_group(
     dossier: &Dossier,
     records: &[NormalizedRecord],
     county_parcels: &BTreeSet<String>,
+    tracked_parcels: &BTreeSet<String>,
 ) -> Vec<SourceConflict> {
     let mut conflicts = Vec::new();
+    if let Some(conflict) = candidate_conflict(dossier, records, county_parcels, tracked_parcels) {
+        conflicts.push(conflict);
+    }
     if let Some(conflict) = owner_mismatch(dossier, records) {
         conflicts.push(conflict);
     }
@@ -180,6 +202,37 @@ fn conflicts_for_group(
         conflicts.push(conflict);
     }
     conflicts
+}
+
+fn candidate_conflict(
+    dossier: &Dossier,
+    records: &[NormalizedRecord],
+    county_parcels: &BTreeSet<String>,
+    tracked_parcels: &BTreeSet<String>,
+) -> Option<SourceConflict> {
+    if county_parcels.is_empty() {
+        return None;
+    }
+    let portal = records.iter().find(|record| {
+        record.source_kind() == Some(AdapterKind::SiteControlExport)
+            && record.parcel_id_norm.is_some()
+            && (record.gclba_label.unwrap_or(false) || owner_is_gclba(record))
+    })?;
+    let parcel_id = portal.parcel_id_norm.as_ref()?;
+    if county_parcels.contains(parcel_id) || tracked_parcels.contains(parcel_id) {
+        return None;
+    }
+    Some(conflict(
+        dossier,
+        ConflictKind::Candidate,
+        "review",
+        "Portal parcel is not in county or compliance tracking",
+        "The portal labels this parcel as land bank owned, but it is absent from the current county land bank layer and absent from compliance tracking.",
+        vec![
+            format!("Portal source record {}", portal.source_record_id),
+            format!("Parcel {}", parcel_id),
+        ],
+    ))
 }
 
 fn owner_mismatch(dossier: &Dossier, records: &[NormalizedRecord]) -> Option<SourceConflict> {
@@ -351,7 +404,7 @@ fn candidate_for_conflict(conflict: &SourceConflict, dossier: &Dossier) -> Candi
     CandidateProperty {
         id: stable_id(&[conflict.id.as_str(), "candidate"]),
         parcel_id: conflict.parcel_id.clone(),
-        reason: "Portal ownership disagrees with county ownership".to_string(),
+        reason: "Portal parcel is absent from county and compliance tracking".to_string(),
         source_conflict_id: conflict.id.clone(),
         address: dossier.address.clone(),
         evidence: conflict.evidence.clone(),
@@ -387,6 +440,10 @@ fn coverage_for(
             .count(),
         candidate_count: candidates.len(),
         per_source: sources,
+        datawave_ingested: 0,
+        datawave_skipped: 0,
+        datawave_fields_written: 0,
+        datawave_edges_written: 0,
     }
 }
 
@@ -465,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn seeded_owner_mismatch_yields_one_conflict_and_candidate() {
+    fn seeded_owner_mismatch_yields_owner_conflict_without_candidate() {
         let payload = build_index(vec![
             record(
                 AdapterKind::SiteControlExport,
@@ -486,13 +543,39 @@ mod tests {
             .filter(|conflict| conflict.kind == ConflictKind::OwnerMismatch)
             .collect();
         assert_eq!(owner_mismatches.len(), 1);
-        assert_eq!(payload.candidates.len(), 1);
+        assert_eq!(payload.candidates.len(), 0);
         assert_eq!(payload.coverage.parcels_indexed, 1);
         assert_eq!(payload.coverage.home_count, 1);
     }
 
     #[test]
-    fn all_five_conflict_kinds_are_detectable() {
+    fn portal_parcel_absent_from_county_and_compliance_yields_candidate() {
+        let portal_candidate = record(
+            AdapterKind::SiteControlExport,
+            "40-12-345-067",
+            "GCLBA",
+            Some(true),
+        );
+        let county_other = record(
+            AdapterKind::CountyArcgis,
+            "40-12-345-068",
+            "GCLBA",
+            Some(true),
+        );
+
+        let payload = build_index(vec![portal_candidate, county_other]);
+        let candidates: Vec<_> = payload
+            .conflicts
+            .iter()
+            .filter(|conflict| conflict.kind == ConflictKind::Candidate)
+            .collect();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(payload.candidates.len(), 1);
+        assert_eq!(payload.coverage.candidate_count, 1);
+    }
+
+    #[test]
+    fn all_conflict_kinds_are_detectable() {
         let mut portal_owner = record(
             AdapterKind::SiteControlExport,
             "40-12-345-067",
@@ -529,6 +612,12 @@ mod tests {
             "PRIVATE OWNER",
             Some(false),
         );
+        let portal_candidate = record(
+            AdapterKind::SiteControlExport,
+            "40-12-345-100",
+            "GCLBA",
+            Some(true),
+        );
 
         let payload = build_index(vec![
             portal_owner,
@@ -536,6 +625,7 @@ mod tests {
             county_gclba,
             portal_private,
             orphan,
+            portal_candidate,
         ]);
         let kinds: BTreeSet<_> = payload
             .conflicts
@@ -544,6 +634,7 @@ mod tests {
             .collect();
         for kind in [
             ConflictKind::OwnerMismatch,
+            ConflictKind::Candidate,
             ConflictKind::ReverseMismatch,
             ConflictKind::PidOrphan,
             ConflictKind::ConditionRegression,

@@ -70,7 +70,11 @@ impl SiteControlExportAdapter {
             .ok_or_else(|| anyhow!("geojson export must contain a features array"))?;
         let mut records = Vec::new();
         for (index, feature) in features.iter().enumerate() {
-            let Some(properties) = feature.get("properties").and_then(Value::as_object) else {
+            let Some(properties) = feature
+                .get("properties")
+                .or_else(|| feature.get("attributes"))
+                .and_then(Value::as_object)
+            else {
                 continue;
             };
             records.push(self.record_from_object(properties, index)?);
@@ -120,9 +124,12 @@ impl SiteControlExportAdapter {
         normalized: &Map<String, Value>,
         index: usize,
     ) -> Result<NormalizedRecord> {
-        let parcel_id = first_value(
+        let parcel_id = first_parcel_id(
             normalized,
             &[
+                "parcid",
+                "paridshort",
+                "paridpack",
                 "parcelid",
                 "parcelnumber",
                 "parcelno",
@@ -135,11 +142,13 @@ impl SiteControlExportAdapter {
         let address = first_value(
             normalized,
             &[
+                "addressfullc",
                 "siteaddress",
                 "propertyaddress",
                 "address",
                 "situsaddress",
                 "location",
+                "propcomb",
             ],
         );
         let owner = first_value(
@@ -150,23 +159,42 @@ impl SiteControlExportAdapter {
                 "ownernorm",
                 "taxpayer",
                 "taxpayername",
+                "ownname",
+                "taxname",
+                "ownerofrecord",
             ],
         );
         let owner_norm = owner.as_deref().and_then(normalize_owner_opt);
         let explicit_gclba = first_value(
             normalized,
-            &["gclbalabel", "gclbaowned", "landbankowned", "ownedbygclba"],
+            &[
+                "gclbalabel",
+                "gclbaowned",
+                "gclbowned",
+                "landbankowned",
+                "ownedbygclba",
+            ],
         )
         .as_deref()
         .and_then(parse_bool);
-        let gclba_label = explicit_gclba.or_else(|| owner_norm.as_deref().map(is_gclba_owner));
+        let source_inventory_label = self.source == AdapterKind::SiteControlExport
+            && ["fhstatus", "r4rstatus", "parclrcsold", "tblpropcatmeaning"]
+                .iter()
+                .any(|name| normalized.contains_key(*name));
+        let gclba_label = explicit_gclba
+            .or_else(|| owner_norm.as_deref().map(is_gclba_owner))
+            .or(source_inventory_label.then_some(true));
         let structure_flag = first_value(
             normalized,
             &[
                 "structureflag",
                 "hasstructure",
                 "improved",
+                "parcpropclass",
                 "propertyclass",
+                "propclass",
+                "classtype",
+                "tblpropcatmeaning",
                 "landuse",
                 "usetype",
             ],
@@ -180,6 +208,7 @@ impl SiteControlExportAdapter {
                 "conditiongrade",
                 "surveycondition",
                 "buildingcondition",
+                "portalcondition",
             ],
         );
         let prior_condition_grade = first_value(
@@ -194,19 +223,48 @@ impl SiteControlExportAdapter {
         let assessed_value = first_value(
             normalized,
             &[
+                "parcpropassmt",
                 "assessedvalue",
                 "assessment",
+                "sev",
+                "currentsev",
+                "cap",
                 "taxablevalue",
                 "stateequalizedvalue",
+                "fhaskingprice",
+                "parcaskingprice",
+                "minimumbid",
             ],
         )
         .as_deref()
         .and_then(parse_money);
-        let observed_at = first_value(normalized, &["observedat", "updatedat", "exportedat"])
-            .unwrap_or_else(|| "1970-01-01".to_string());
-        let source_record_id = first_value(normalized, &["sourcerecordid", "id", "objectid"])
-            .or_else(|| parcel_id_norm.clone())
-            .unwrap_or_else(|| format!("{}:{index}", self.source_id()));
+        let observed_at = first_value(
+            normalized,
+            &[
+                "observedat",
+                "updatedat",
+                "exportedat",
+                "websitepublishenddate",
+                "flyercreated",
+                "flyerpublished",
+                "portalsurveydate",
+                "reviewedat",
+            ],
+        )
+        .unwrap_or_else(|| "1970-01-01".to_string());
+        let source_record_id = first_value(
+            normalized,
+            &[
+                "sourcerecordid",
+                "id",
+                "objectid",
+                "fid",
+                "parcid",
+                "parcelid",
+            ],
+        )
+        .or_else(|| parcel_id_norm.clone())
+        .unwrap_or_else(|| format!("{}:{index}", self.source_id()));
 
         Ok(NormalizedRecord {
             source_id: self.source_id().to_string(),
@@ -222,8 +280,22 @@ impl SiteControlExportAdapter {
             condition_grade,
             prior_condition_grade,
             assessed_value,
-            sale_date: first_value(normalized, &["saledate", "lastsaledate"]),
-            program: first_value(normalized, &["program", "dispositionprogram"]),
+            sale_date: first_value(
+                normalized,
+                &["saledate", "lastsaledate", "dateofsale", "datesold"],
+            ),
+            program: first_value(
+                normalized,
+                &[
+                    "program",
+                    "dispositionprogram",
+                    "fhstatus",
+                    "r4rstatus",
+                    "tblpropcatmeaning",
+                    "compliance",
+                    "2023foreclosuresstatus",
+                ],
+            ),
             facts: public_facts(original),
         })
     }
@@ -237,23 +309,48 @@ fn first_value(map: &Map<String, Value>, names: &[&str]) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
+fn first_parcel_id(map: &Map<String, Value>, names: &[&str]) -> Option<String> {
+    let mut fallback = None;
+    for name in names {
+        let Some(value) = map
+            .get(*name)
+            .map(value_to_string)
+            .filter(|value| !value.trim().is_empty())
+        else {
+            continue;
+        };
+        if fallback.is_none() {
+            fallback = Some(value.clone());
+        }
+        if normalize_parcel_id(&value).is_some() {
+            return Some(value);
+        }
+    }
+    fallback
+}
+
 fn structure_from_value(value: &str) -> Option<bool> {
     if let Some(parsed) = parse_bool(value) {
         return Some(parsed);
     }
     let lower = value.to_ascii_lowercase();
-    if lower.contains("vacant") && lower.contains("lot") {
+    let numeric = lower
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if numeric == "402" || lower.contains("vacant") {
         Some(false)
-    } else if [
-        "home",
-        "house",
-        "residential",
-        "dwelling",
-        "structure",
-        "improved",
-    ]
-    .iter()
-    .any(|term| lower.contains(term))
+    } else if numeric == "401"
+        || [
+            "home",
+            "house",
+            "residential",
+            "dwelling",
+            "structure",
+            "improved",
+        ]
+        .iter()
+        .any(|term| lower.contains(term))
     {
         Some(true)
     } else {
@@ -268,4 +365,69 @@ fn public_facts(object: &Map<String, Value>) -> BTreeMap<String, Value> {
         .filter(|(_, value)| !value.is_null())
         .map(|(key, value)| (key.clone(), value.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn county_arcgis_adapter_reads_land_bank_layer_fields() {
+        let payload = r#"{
+          "features": [
+            {
+              "attributes": {
+                "FID": 1,
+                "ParIDShort": "53-35-580-031",
+                "PARIDPACK": "5335580031",
+                "PropComb": "11598 ORCHARDVIEW DR",
+                "PropClass": "402-RESIDENTIAL VACANT",
+                "OwnName": "GENESEE COUNTY LAND BANK AUTHORITY",
+                "Assessment": 0
+              }
+            }
+          ]
+        }"#;
+        let rows = SiteControlExportAdapter::county_arcgis()
+            .parse_bytes(payload.as_bytes())
+            .unwrap();
+        let row = &rows[0];
+        assert_eq!(row.source_id, "county_arcgis");
+        assert_eq!(row.source_record_id, "1");
+        assert_eq!(row.parcel_id_norm.as_deref(), Some("53-35-580-031"));
+        assert_eq!(row.address.as_deref(), Some("11598 ORCHARDVIEW DR"));
+        assert_eq!(
+            row.owner_norm.as_deref(),
+            Some("GENESEE COUNTY LAND BANK AUTHORITY")
+        );
+        assert_eq!(row.structure_flag, Some(false));
+        assert_eq!(row.assessed_value, Some(0.0));
+    }
+
+    #[test]
+    fn county_arcgis_prefers_normalizable_short_parcel_id() {
+        let csv = "FID,ParIDShort,ParcelID,PARIDPACK,PropComb,PropClass,OwnName,Assessment\n\
+                   1,53-35-580-031,25-53-35-580-031,5335580031,11598 ORCHARDVIEW DR,402-RESIDENTIAL VACANT,GENESEE COUNTY LAND BANK AUTHORITY,0\n";
+        let rows = SiteControlExportAdapter::county_arcgis()
+            .parse_bytes(csv.as_bytes())
+            .unwrap();
+        assert_eq!(rows[0].parcel_id.as_deref(), Some("53-35-580-031"));
+        assert_eq!(rows[0].parcel_id_norm.as_deref(), Some("53-35-580-031"));
+    }
+
+    #[test]
+    fn featured_homes_export_fields_imply_gclba_inventory() {
+        let csv = "Parc_Id,Address Full_c,Parc_Prop_Class,Parc_Prop_Assmt,FH_Status,GCLB Owned,Tbl_Prop_Cat_Meaning\n\
+                   4002426001,\"1009 W DAYTON ST\nFLINT, MI 48504\",401,7200,Needs Cleanout,,Sell\n";
+        let rows = SiteControlExportAdapter::default()
+            .parse_bytes(csv.as_bytes())
+            .unwrap();
+        let row = &rows[0];
+        assert_eq!(row.source_record_id, "4002426001");
+        assert_eq!(row.parcel_id_norm.as_deref(), Some("40-02-426-001"));
+        assert_eq!(row.gclba_label, Some(true));
+        assert_eq!(row.structure_flag, Some(true));
+        assert_eq!(row.assessed_value, Some(7200.0));
+        assert_eq!(row.program.as_deref(), Some("Needs Cleanout"));
+    }
 }

@@ -1,6 +1,7 @@
 use crate::adapters::parse_adapter_bytes;
+use crate::datawave::{ingest_datawave_records, DatawaveBatchSummary};
 use crate::models::{AdapterKind, IndexPayload, NormalizedRecord};
-use crate::resolution::build_index;
+use crate::resolution::{attach_datawave_summary, build_index};
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Debug)]
 pub struct ExportStore {
     root: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct RebuildResult {
+    pub payload: IndexPayload,
+    pub datawave: DatawaveBatchSummary,
 }
 
 impl ExportStore {
@@ -39,7 +46,15 @@ impl ExportStore {
     }
 
     pub fn rebuild_index(&self) -> Result<IndexPayload> {
-        Ok(build_index(self.load_records()?))
+        Ok(self.rebuild_index_with_datawave()?.payload)
+    }
+
+    pub fn rebuild_index_with_datawave(&self) -> Result<RebuildResult> {
+        let records = self.load_records()?;
+        let datawave = ingest_datawave_records(&records)?;
+        let mut payload = build_index(records);
+        attach_datawave_summary(&mut payload, &datawave);
+        Ok(RebuildResult { payload, datawave })
     }
 
     pub fn load_records(&self) -> Result<Vec<NormalizedRecord>> {
@@ -158,6 +173,26 @@ mod tests {
             Some(&1)
         );
         assert_eq!(payload.coverage.per_source.get("filemaker_csv"), Some(&1));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn export_store_replay_records_datawave_summary() {
+        let root = test_dir("export-store-datawave");
+        let store = ExportStore::new(&root);
+        let portal = "parcel_id,address,owner,gclba_owned,property_class\n\
+                      40-12-345-067,123 North Saginaw Street,GCLBA,true,Residential";
+        store
+            .save_export(AdapterKind::SiteControlExport, portal.as_bytes())
+            .unwrap();
+
+        let result = store.rebuild_index_with_datawave().unwrap();
+
+        assert_eq!(result.datawave.ingested, 1);
+        assert_eq!(result.datawave.skipped, 0);
+        assert_eq!(result.payload.coverage.datawave_ingested, 1);
+        assert!(result.payload.coverage.datawave_fields_written >= 5);
 
         fs::remove_dir_all(root).ok();
     }

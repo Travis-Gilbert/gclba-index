@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -13,7 +14,16 @@ use tokio::sync::RwLock;
 #[derive(Clone, Debug)]
 pub struct AppState {
     payload: Arc<RwLock<IndexPayload>>,
+    rebuild_status: Arc<RwLock<RebuildJobStatus>>,
     store: ExportStore,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebuildJobStatus {
+    pub running: bool,
+    pub last_result: Option<String>,
+    pub last_error: Option<String>,
 }
 
 pub fn router(payload: IndexPayload) -> Router {
@@ -23,11 +33,14 @@ pub fn router(payload: IndexPayload) -> Router {
 pub fn router_with_store(payload: IndexPayload, store: ExportStore) -> Router {
     let state = AppState {
         payload: Arc::new(RwLock::new(payload)),
+        rebuild_status: Arc::new(RwLock::new(RebuildJobStatus::default())),
         store,
     };
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ingest/{adapter}", post(ingest))
+        .route("/rebuild", post(rebuild))
+        .route("/rebuild/status", get(rebuild_status))
         .route("/dossier/{parcel_id}", get(dossier))
         .route("/conflicts", get(conflicts))
         .route("/coverage", get(coverage))
@@ -40,6 +53,7 @@ async fn healthz() -> &'static str {
 
 async fn ingest(
     Path(adapter): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
     State(state): State<AppState>,
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -48,13 +62,95 @@ async fn ingest(
         .store
         .save_export(adapter, &body)
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
-    let payload = state
+    if truthy(query.get("defer")) {
+        let coverage = state.payload.read().await.coverage.clone();
+        return Ok((StatusCode::ACCEPTED, Json(coverage)));
+    }
+    rebuild_payload(state)
+        .await
+        .map(|coverage| (StatusCode::CREATED, Json(coverage)))
+}
+
+async fn rebuild(
+    Query(query): Query<HashMap<String, String>>,
+    State(state): State<AppState>,
+) -> Result<Response, ApiError> {
+    if truthy(query.get("background")) {
+        let status = start_background_rebuild(state).await;
+        return Ok((StatusCode::ACCEPTED, Json(status)).into_response());
+    }
+    rebuild_payload(state)
+        .await
+        .map(|coverage| (StatusCode::OK, Json(coverage)).into_response())
+}
+
+async fn rebuild_status(State(state): State<AppState>) -> impl IntoResponse {
+    Json(state.rebuild_status.read().await.clone())
+}
+
+async fn start_background_rebuild(state: AppState) -> RebuildJobStatus {
+    {
+        let current = state.rebuild_status.read().await;
+        if current.running {
+            return current.clone();
+        }
+    }
+    {
+        let mut current = state.rebuild_status.write().await;
+        current.running = true;
+        current.last_result = None;
+        current.last_error = None;
+    }
+
+    let status = state.rebuild_status.clone();
+    let payload = state.payload.clone();
+    let store = state.store.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || store.rebuild_index_with_datawave()).await;
+        let mut current = status.write().await;
+        match result {
+            Ok(Ok(rebuild)) => {
+                let coverage = rebuild.payload.coverage.clone();
+                *payload.write().await = rebuild.payload;
+                current.running = false;
+                current.last_result = Some(format!(
+                    "rebuilt {} parcels, datawave ingested {}",
+                    coverage.parcels_indexed, coverage.datawave_ingested
+                ));
+                current.last_error = None;
+            }
+            Ok(Err(err)) => {
+                current.running = false;
+                current.last_error = Some(err.to_string());
+            }
+            Err(err) => {
+                current.running = false;
+                current.last_error = Some(err.to_string());
+            }
+        }
+    });
+
+    state.rebuild_status.read().await.clone()
+}
+
+async fn rebuild_payload(state: AppState) -> Result<crate::models::CoverageSummary, ApiError> {
+    let rebuild = state
         .store
-        .rebuild_index()
+        .rebuild_index_with_datawave()
         .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    let payload = rebuild.payload;
     let coverage = payload.coverage.clone();
     *state.payload.write().await = payload;
-    Ok((StatusCode::CREATED, Json(coverage)))
+    Ok(coverage)
+}
+
+fn truthy(value: Option<&String>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "y"
+        )
+    })
 }
 
 async fn dossier(
@@ -87,11 +183,16 @@ async fn conflicts(
         .map(|value| value.parse::<ConflictKind>())
         .transpose()
         .map_err(ApiError::bad_request)?;
+    let limit = query
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(100);
     let payload = state.payload.read().await;
     let conflicts: Vec<_> = payload
         .conflicts
         .iter()
         .filter(|conflict| kind.is_none_or(|kind| conflict.kind == kind))
+        .take(limit)
         .cloned()
         .collect();
     Ok(Json(conflicts))
@@ -189,10 +290,99 @@ mod tests {
         let coverage: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(coverage["parcelsIndexed"], 1);
         assert_eq!(coverage["sourceCount"], 2);
+        assert_eq!(coverage["datawaveIngested"], 2);
+        assert_eq!(coverage["datawaveSkipped"], 0);
 
         assert!(root.join("site_control_export").exists());
         assert!(root.join("filemaker_csv").exists());
         fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn http_ingest_can_defer_rebuild_until_explicit_rebuild() {
+        let root = test_dir("http-deferred-ingest");
+        let csv = "parcel_id,address,owner,gclba_owned,property_class\n\
+                   40-12-345-067,123 North Saginaw Street,GCLBA,true,Residential";
+        let app = router_with_store(IndexPayload::default(), ExportStore::new(&root));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/ingest/site_control_export?defer=true")
+                    .body(Body::from(csv))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rebuild")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let coverage: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(coverage["parcelsIndexed"], 1);
+        assert_eq!(coverage["datawaveIngested"], 1);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn background_rebuild_reports_status() {
+        let root = test_dir("http-background-rebuild");
+        let store = ExportStore::new(&root);
+        let csv = "parcel_id,address,owner,gclba_owned,property_class\n\
+                   40-12-345-067,123 North Saginaw Street,GCLBA,true,Residential";
+        store
+            .save_export(AdapterKind::SiteControlExport, csv.as_bytes())
+            .unwrap();
+        let app = router_with_store(IndexPayload::default(), store);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rebuild?background=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..50 {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/rebuild/status")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let status: Value = serde_json::from_slice(&body).unwrap();
+            if status["running"] == false {
+                assert!(status["lastResult"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("rebuilt"));
+                fs::remove_dir_all(root).ok();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("background rebuild did not finish");
     }
 
     fn test_dir(name: &str) -> PathBuf {

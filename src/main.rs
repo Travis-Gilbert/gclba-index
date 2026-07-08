@@ -2,8 +2,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use gclba_index::http;
 use gclba_index::{
-    build_index, ingest_datawave_records, parse_adapter_bytes, AdapterKind, ExportStore,
-    IndexPayload,
+    attach_datawave_summary, build_index, ingest_datawave_records, parse_adapter_bytes,
+    AdapterKind, ExportStore, IndexPayload,
 };
 use std::path::PathBuf;
 
@@ -54,7 +54,8 @@ async fn main() -> Result<()> {
             let bytes = std::fs::read(&file)?;
             let records = parse_adapter_bytes(adapter, &bytes)?;
             let datawave = ingest_datawave_records(&records)?;
-            let payload = build_index(records);
+            let mut payload = build_index(records);
+            attach_datawave_summary(&mut payload, &datawave);
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -80,7 +81,8 @@ async fn main() -> Result<()> {
                 records.extend(parse_adapter_bytes(adapter, &bytes)?);
             }
             let datawave = ingest_datawave_records(&records)?;
-            let payload = build_index(records);
+            let mut payload = build_index(records);
+            attach_datawave_summary(&mut payload, &datawave);
             if let Some(parent) = output.parent() {
                 std::fs::create_dir_all(parent)?;
             }

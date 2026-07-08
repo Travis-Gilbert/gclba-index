@@ -4,5 +4,5 @@ builder = "nixpacks"
 [deploy]
 startCommand = "./bin/gclba-index serve --bind 0.0.0.0:${PORT}"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 10
+healthcheckTimeout = 180
 restartPolicyType = "on_failure"
